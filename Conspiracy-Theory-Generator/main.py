@@ -3,6 +3,9 @@ import sys
 import asyncio
 from typing import List
 
+# Needed for streaming token events
+from openai.types.responses import ResponseTextDeltaEvent
+
 try:
     from agents import Agent, Runner, WebSearchTool, ItemHelpers, ModelSettings, function_tool
 except ImportError:
@@ -135,6 +138,9 @@ conspiracy_agent = Agent(
         "Output structure: write short explanatory paragraphs, and after each paragraph add a new line that begins with 'Evidence:' followed by the list of URLs used in that paragraph. "
         "Be creative, engaging, and sly, but remain grounded in the verifiable information you cite."
         "Make it something that is not already known, and make it something that is not already out there. "
+        "Only make things you can prove, and make it something that is not already out there. "
+        "Dont make theories that are very obviously fake "
+        "Gold Mines for some proof for a theory are Declassified documents, and court cases. "
     ),
     tools=[WebSearchTool(), search_verified_links, verify_url_tool],
     model_settings=ModelSettings(tool_choice="required"),
@@ -148,24 +154,34 @@ def generate_conspiracy(topic: str) -> str:
 
 
 async def main_async(topic: str):
-    """Generate the conspiracy (non-streaming), verify all URLs, then print.
+    """Stream the agent's output, then verify and correct links.
 
-    Removing streaming avoids printing unverified links. The output is shown
-    only after every link has passed `verify_url` or has been scrubbed.
+    We stream tokens live for user feedback but also buffer everything so we can
+    scrub dead links afterward, printing a corrected version if needed.
     """
 
     import re
 
-    result = await Runner.run(conspiracy_agent, input=topic)
+    result_stream = Runner.run_streamed(conspiracy_agent, input=topic)
 
-    # Collect ALL message outputs to ensure we capture the full narrative, not
-    # only the last assistant message (which sometimes includes just the links).
-    message_chunks: list[str] = []
-    for item in result.new_items:
-        if getattr(item, "type", None) == "message_output_item":
-            message_chunks.append(ItemHelpers.text_message_output(item))
+    buffer: list[str] = []
 
-    full_output: str = "\n".join(message_chunks) if message_chunks else str(result.final_output)
+    async for event in result_stream.stream_events():
+        if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
+            token = event.data.delta
+            print(token, end="", flush=True)
+            buffer.append(token)
+            continue
+
+        if event.type == "run_item_stream_event" and event.item.type == "message_output_item":
+            chunk = ItemHelpers.text_message_output(event.item)
+            print(chunk, end="", flush=True)
+            buffer.append(chunk)
+
+    # newline after stream ends
+    print()
+
+    full_output = "".join(buffer)
 
     link_pattern = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
     replacements: dict[str, str] = {}
@@ -175,12 +191,16 @@ async def main_async(topic: str):
             replacements[match.group(0)] = "[INVALID LINK REMOVED]"
 
     if replacements:
+        corrected = full_output
         for original, replacement in replacements.items():
-            full_output = full_output.replace(original, replacement)
+            corrected = corrected.replace(original, replacement)
 
-        full_output += "\n\n---\n\nThe following links were removed after failing verification:\n" + "\n".join(replacements.keys())
+        print("\n---\nThe following links were removed after verification failure:")
+        for faulty in replacements.keys():
+            print(f"- {faulty}")
 
-    print("\n" + full_output.strip())
+        print("\nCorrected output (with invalid links removed):\n")
+        print(corrected.strip())
 
 
 def main():
