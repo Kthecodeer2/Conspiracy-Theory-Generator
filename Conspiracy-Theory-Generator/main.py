@@ -4,7 +4,7 @@ import asyncio
 from typing import List
 
 try:
-    from agents import Agent, Runner, function_tool
+    from agents import Agent, Runner, WebSearchTool, ItemHelpers, ModelSettings, function_tool
 except ImportError:
     raise SystemExit("The 'openai-agents' package is required. Install it with 'pip install openai-agents duckduckgo-search'.")
 
@@ -13,26 +13,117 @@ try:
 except ImportError:
     raise SystemExit("The 'duckduckgo-search' package is required. Install it with 'pip install duckduckgo-search'.")
 
+try:
+    import requests
+except ImportError:
+    raise SystemExit("The 'requests' package is required. Install it with 'pip install requests'.")
+
 
 @function_tool
 def web_search(query: str, max_results: int = 5) -> List[str]:
-    """Perform a web search and return up to `max_results` short snippets.
+    """Perform a DuckDuckGo search and return up to `max_results` concise snippets.
 
-    The search intentionally uses DuckDuckGo to avoid tracking and filters
-    explicit content by default. 
+    The helper first tries the DDGS() context-manager interface. If that fails
+    (e.g., because of rate-limits or networking issues) it falls back to the
+    simpler `duckduckgo_search.ddg` helper.  Any runtime problems are
+    propagated so that the calling agent is aware a search really failed.
     """
+
+    from duckduckgo_search import ddg  # imported here to avoid import cycles
+
     snippets: List[str] = []
-    with DDGS() as ddgs:
-        for result in ddgs.text(query, max_results=max_results):
-            title = result.get("title", "")
-            body = result.get("body", "")
-            snippet = f"{title}: {body}"
-            # Truncate overly long snippets to keep token usage low
-            snippets.append(snippet[:200])
-    return snippets
+
+    def _truncate(text: str, limit: int = 200) -> str:
+        return text[:limit]
+
+    try:
+        # Preferred, gives richer metadata.
+        with DDGS() as ddgs:
+            for result in ddgs.text(query, max_results=max_results):
+                title = result.get("title", "")
+                body = result.get("body", "")
+                snippet = f"{title}: {body}"
+                snippets.append(_truncate(snippet))
+
+        # If DDGS returned nothing, try the lightweight fallback.
+        if not snippets:
+            raise ValueError("DDGS returned no results; falling back to ddg helper.")
+
+    except Exception:
+        # Fallback strategy using the simpler helper which is sometimes more reliable.
+        try:
+            results = ddg(query, max_results=max_results) or []
+            for res in results:
+                title = res.get("title", "")
+                body = res.get("body", "") or res.get("snippet", "")
+                snippet = f"{title}: {body}"
+                snippets.append(_truncate(snippet))
+        except Exception as e:
+            # Bubble up an explicit error so the calling agent can react.
+            raise RuntimeError(f"web_search failed: {e}")
+
+    # Ensure we respect the requested max_results, even after fallback.
+    return snippets[:max_results]
 
 
-# Define the agent responsible for generating conspiracies ethically.
+# NOTE: The @function_tool decorator wraps the function in a non-callable
+# FunctionTool object. We expose a thin internal wrapper `_verify_url` for
+# regular Python calls, and keep the wrapped version (`verify_url_tool`) for
+# the agent.
+
+
+def _verify_url_impl(url: str, timeout_seconds: int = 5) -> bool:
+    try:
+        response = requests.head(url, allow_redirects=True, timeout=timeout_seconds)
+        if response.status_code < 400:
+            return True
+        if response.status_code in (405, 501):
+            response = requests.get(url, allow_redirects=True, timeout=timeout_seconds, stream=True)
+            return response.status_code < 400
+        return False
+    except Exception:
+        return False
+
+
+# Expose as tool for the agent
+@function_tool
+def verify_url_tool(url: str, timeout_seconds: int = 5) -> bool:
+    """Agent-facing wrapper around `_verify_url_impl`."""
+    return _verify_url_impl(url, timeout_seconds)
+
+
+# -----------------------------------------------------------------------------
+# Helper tool: search + verify in one call
+# -----------------------------------------------------------------------------
+
+
+@function_tool
+def search_verified_links(query: str, max_results: int = 5) -> List[str]:
+    """Return up to `max_results` verified URLs relevant to `query`.
+
+    1. Perform a DuckDuckGo search for the query (via the local ddg helper).
+    2. For each result, call `verify_url` to ensure the link is live (HTTP < 400).
+    3. Return a list of URLs that passed verification.
+    """
+
+    from duckduckgo_search import ddg
+
+    verified: List[str] = []
+    try:
+        results = ddg(query, max_results=max_results * 4) or []  # fetch more in case some fail
+        for res in results:
+            url = res.get("href") or res.get("url") or ""
+            if url and _verify_url_impl(url):
+                verified.append(url)
+            if len(verified) >= max_results:
+                break
+    except Exception:
+        pass
+
+    return verified[:max_results]
+
+
+# Define the agent responsible for generating conspiracies.
 conspiracy_agent = Agent(
     name="Conspiracy Theorist",
     instructions=(
@@ -40,14 +131,13 @@ conspiracy_agent = Agent(
         "You are 'The Conspiracy Theorist', an AI that crafts elaborate conspiracy narratives. "
         "For EVERY factual statement or claim you make, you MUST immediately supply at least one piece of supporting evidence. "
         "Evidence MUST be presented as a full, direct URL (including https://) that points to a publicly available source such as a news article, court document, academic paper, interview transcript, or similar record. "
-        "If several claims appear in one sentence, provide multiple URLs separated by semicolons. "
-        "Always rely on the `web_search` tool to discover these sources; never invent or hallucinate URLs. If you cannot find a verifiable source for a claim, omit the claim. "
+        "Always begin by calling `search_verified_links` with a concise query about the statement you're supporting. Use the returned list of verified URLs as evidence. If additional links are needed, call `WebSearchTool` for more candidates and check each with `verify_url`. Never include a URL you haven't verified. If no verified link is available, omit the claim. "
         "Output structure: write short explanatory paragraphs, and after each paragraph add a new line that begins with 'Evidence:' followed by the list of URLs used in that paragraph. "
         "Be creative, engaging, and sly, but remain grounded in the verifiable information you cite."
+        "Make it something that is not already known, and make it something that is not already out there. "
     ),
-    tools=[web_search],
-    
-    
+    tools=[WebSearchTool(), search_verified_links, verify_url_tool],
+    model_settings=ModelSettings(tool_choice="required"),
 )
 
 
@@ -58,8 +148,39 @@ def generate_conspiracy(topic: str) -> str:
 
 
 async def main_async(topic: str):
-    result = await Runner.run(conspiracy_agent, topic)
-    print("\n" + result.final_output.strip())
+    """Generate the conspiracy (non-streaming), verify all URLs, then print.
+
+    Removing streaming avoids printing unverified links. The output is shown
+    only after every link has passed `verify_url` or has been scrubbed.
+    """
+
+    import re
+
+    result = await Runner.run(conspiracy_agent, input=topic)
+
+    # Collect ALL message outputs to ensure we capture the full narrative, not
+    # only the last assistant message (which sometimes includes just the links).
+    message_chunks: list[str] = []
+    for item in result.new_items:
+        if getattr(item, "type", None) == "message_output_item":
+            message_chunks.append(ItemHelpers.text_message_output(item))
+
+    full_output: str = "\n".join(message_chunks) if message_chunks else str(result.final_output)
+
+    link_pattern = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+    replacements: dict[str, str] = {}
+    for match in link_pattern.finditer(full_output):
+        url = match.group(2)
+        if not _verify_url_impl(url):
+            replacements[match.group(0)] = "[INVALID LINK REMOVED]"
+
+    if replacements:
+        for original, replacement in replacements.items():
+            full_output = full_output.replace(original, replacement)
+
+        full_output += "\n\n---\n\nThe following links were removed after failing verification:\n" + "\n".join(replacements.keys())
+
+    print("\n" + full_output.strip())
 
 
 def main():
