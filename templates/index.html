@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Conspiracy Theory Generator</title>
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='styles.css') }}"
+    />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Conspiracy Theory Generator</h1>
+
+      <form id="topic-form" autocomplete="off">
+        <input
+          id="topic-input"
+          type="text"
+          placeholder="Enter a topic (e.g., moon landing, pyramids)"
+          required
+        />
+        <button type="submit">Generate</button>
+      </form>
+
+      <pre id="output" class="output" aria-live="polite"></pre>
+    </div>
+
+    <script>
+      const form = document.getElementById("topic-form");
+      const input = document.getElementById("topic-input");
+      const output = document.getElementById("output");
+
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+
+        const topic = input.value.trim();
+        if (!topic) return;
+
+        // Clear any previous results
+        output.textContent = "";
+
+        // Close previous EventSource (if any)
+        if (window.currentSource) {
+          window.currentSource.close();
+        }
+
+        // Encode the topic for use in a query string
+        const src = new EventSource(`/stream?topic=${encodeURIComponent(topic)}`);
+        window.currentSource = src;
+
+        src.onmessage = (ev) => {
+          if (ev.data === "[DONE]") {
+            src.close();
+            return;
+          }
+          output.textContent += ev.data;
+          // Scroll to bottom as new text arrives
+          output.scrollTop = output.scrollHeight;
+        };
+
+        src.onerror = () => {
+          output.textContent += "\n\n[Connection lost]";
+          src.close();
+        };
+      });
+    </script>
+  </body>
+</html> 

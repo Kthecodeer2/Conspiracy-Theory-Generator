@@ -1,0 +1,84 @@
+/* Conspiracy-themed dark aesthetic */
+
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+:root {
+  --accent: #d24aff;
+  --bg-start: #130024;
+  --bg-end: #000000;
+  --text: #e9e9f4;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: 'Share Tech Mono', monospace;
+  background: radial-gradient(circle at 20% 20%, var(--bg-start), var(--bg-end));
+  color: var(--text);
+}
+
+.container {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+  text-align: center;
+}
+
+h1 {
+  font-size: 2.5rem;
+  margin-bottom: 1.5rem;
+  color: var(--accent);
+  text-shadow: 0 0 15px var(--accent);
+}
+
+form {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+input[type="text"] {
+  flex: 1 1 60%;
+  padding: 0.6rem 0.8rem;
+  font-size: 1rem;
+  background: #1d1d2e;
+  border: 2px solid var(--accent);
+  color: var(--text);
+  outline: none;
+}
+
+input[type="text"]:focus {
+  box-shadow: 0 0 8px var(--accent);
+}
+
+button {
+  padding: 0.6rem 1rem;
+  font-size: 1rem;
+  font-weight: bold;
+  background: var(--accent);
+  border: none;
+  color: #000;
+  cursor: pointer;
+  transition: background 0.2s ease-in-out;
+}
+
+button:hover {
+  background: #b33be6;
+}
+
+.output {
+  background: rgba(0, 0, 0, 0.9);
+  border: 2px solid var(--accent);
+  border-radius: 6px;
+  padding: 1.2rem;
+  height: 420px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  text-align: left;
+  font-size: 1.05rem;
+  line-height: 1.45;
+  word-break: break-word;
+} 

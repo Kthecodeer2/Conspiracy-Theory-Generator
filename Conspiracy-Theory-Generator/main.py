@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 from typing import List
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 # Needed for streaming token events
 from openai.types.responses import ResponseTextDeltaEvent
@@ -69,6 +70,38 @@ def web_search(query: str, max_results: int = 5) -> List[str]:
     return snippets[:max_results]
 
 
+# ---------------------------------------------------------------------------
+# URL sanitization helper – strip the ``?utm=openai`` (or ``&utm=openai``)
+# tracking parameter from all outgoing links.
+# ---------------------------------------------------------------------------
+
+
+def _strip_utm_openai(url: str) -> str:
+    """Return *url* without the ``utm=openai`` query parameter.
+
+    This helper preserves all other query parameters while removing any
+    parameter named exactly ``utm`` whose value is ``openai``.  If the
+    parameter appears multiple times (rare), all occurrences are removed.
+    """
+
+    try:
+        parsed = urlparse(url)
+        qs_filtered = [
+            (k, v)
+            for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+            if not (k == "utm" and v == "openai")
+        ]
+        # Short-circuit if nothing changed to avoid needless rebuilding
+        if len(qs_filtered) == len(parse_qsl(parsed.query)):
+            return url
+
+        sanitized_query = urlencode(qs_filtered, doseq=True)
+        return urlunparse(parsed._replace(query=sanitized_query))
+    except Exception:
+        # On any parsing error, fall back to the original URL (fail-open).
+        return url
+
+
 # NOTE: The @function_tool decorator wraps the function in a non-callable
 # FunctionTool object. We expose a thin internal wrapper `_verify_url` for
 # regular Python calls, and keep the wrapped version (`verify_url_tool`) for
@@ -76,6 +109,10 @@ def web_search(query: str, max_results: int = 5) -> List[str]:
 
 
 def _verify_url_impl(url: str, timeout_seconds: int = 5) -> bool:
+    # Always verify the sanitized version to avoid false negatives when the
+    # target server rejects tracking parameters.
+    url = _strip_utm_openai(url)
+
     try:
         response = requests.head(url, allow_redirects=True, timeout=timeout_seconds)
         if response.status_code < 400:
@@ -115,7 +152,8 @@ def search_verified_links(query: str, max_results: int = 5) -> List[str]:
     try:
         results = ddg(query, max_results=max_results * 4) or []  # fetch more in case some fail
         for res in results:
-            url = res.get("href") or res.get("url") or ""
+            raw_url = res.get("href") or res.get("url") or ""
+            url = _strip_utm_openai(raw_url)
             if url and _verify_url_impl(url):
                 verified.append(url)
             if len(verified) >= max_results:

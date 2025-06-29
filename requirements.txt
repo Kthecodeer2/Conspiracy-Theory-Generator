@@ -1,0 +1,4 @@
+flask>=2.2
+openai-agents
+duckduckgo-search
+requests 
